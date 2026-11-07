@@ -9,7 +9,16 @@ DB_PATH = Path(__file__).with_name("rhymesaurus.sqlite3")
 
 FREQUENCY_CATEGORIES = (1, 2, 5, 9, 10)
 
-RHYME_TYPES = ("perfect", "light", "final_syllable")
+RHYME_TYPES = (
+    "perfect",
+    "light",
+    "final_syllable",
+    "first_syllable",
+    "first_syllable_assonance",
+    "back",
+    "reverse",
+    "reverse_first_syllable",
+)
 
 
 class WordNotFoundError(Exception):
@@ -34,12 +43,7 @@ def rhyme_key(reversed_phonemes):
 
 
 def final_rhyme_key(reversed_phonemes):
-    """
-    Return the final vowel and following consonants of a pronunciation.
-
-    The phonemes are reversed, so this consists of the initial consonants
-    encountered, followed by the first vowel. Stress digits are removed.
-    """
+    """Return the final vowel and following consonants."""
     if not reversed_phonemes:
         return None
 
@@ -55,12 +59,7 @@ def final_rhyme_key(reversed_phonemes):
 
 
 def ensure_final_rhyme_keys(db):
-    """
-    Create and populate the indexed final-rhyme table if necessary.
-
-    This is a one-time operation. Once populated, subsequent searches
-    use the index rather than scanning all RHYMES records.
-    """
+    """Create and populate the indexed final-rhyme table if necessary."""
 
     db.execute("""
         CREATE TABLE IF NOT EXISTS FINAL_RHYME_KEYS (
@@ -79,22 +78,17 @@ def ensure_final_rhyme_keys(db):
         ON FINAL_RHYME_KEYS (FINAL_RHYME_KEY)
     """)
 
-    count = db.execute("""
-        SELECT COUNT(*) FROM FINAL_RHYME_KEYS
-    """).fetchone()[0]
+    count = db.execute(
+        "SELECT COUNT(*) FROM FINAL_RHYME_KEYS"
+    ).fetchone()[0]
 
     if count:
         return
 
     source_rows = db.execute("""
         SELECT
-            WORDID,
-            WORD,
-            REVERSEPHONEMES,
-            FREQUENCY,
-            PHONEMES,
-            STRESSEDSYLLABLE,
-            SYLLABLECOUNT
+            WORDID, WORD, REVERSEPHONEMES, FREQUENCY,
+            PHONEMES, STRESSEDSYLLABLE, SYLLABLECOUNT
         FROM RHYMES
     """).fetchall()
 
@@ -118,13 +112,8 @@ def ensure_final_rhyme_keys(db):
 
     db.executemany("""
         INSERT INTO FINAL_RHYME_KEYS (
-            WORDID,
-            WORD,
-            FINAL_RHYME_KEY,
-            FREQUENCY,
-            PHONEMES,
-            STRESSEDSYLLABLE,
-            SYLLABLECOUNT
+            WORDID, WORD, FINAL_RHYME_KEY, FREQUENCY,
+            PHONEMES, STRESSEDSYLLABLE, SYLLABLECOUNT
         )
         VALUES (?, ?, ?, ?, ?, ?, ?)
     """, entries)
@@ -134,6 +123,197 @@ def ensure_final_rhyme_keys(db):
     print(
         f"Built FINAL_RHYME_KEYS: {len(entries):,} pronunciation records."
     )
+
+
+def back_rhyme_key(phonemes, stressed_syllable):
+    """Return the sound from the stressed-syllable onset to the final vowel.
+
+    STRESSEDSYLLABLE is counted backward from the end: 1 is the final
+    syllable, 2 the penultimate, and so on.
+    """
+    if not phonemes or stressed_syllable is None:
+        return None
+
+    tokens = phonemes.split()
+    vowel_indexes = [
+        index for index, token in enumerate(tokens)
+        if token.endswith(("0", "1", "2"))
+    ]
+
+    if not vowel_indexes:
+        return None
+
+    if not 1 <= stressed_syllable <= len(vowel_indexes):
+        return None
+
+    stressed_index = vowel_indexes[len(vowel_indexes) - stressed_syllable]
+    earlier_vowels = [index for index in vowel_indexes if index < stressed_index]
+    start = earlier_vowels[-1] + 1 if earlier_vowels else 0
+    return tuple(tokens[start:vowel_indexes[-1] + 1]) or None
+
+
+def ensure_back_rhyme_keys(db):
+    """Create and populate the indexed Back-rhyme table if necessary."""
+
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS BACK_RHYME_KEYS (
+            WORDID INTEGER PRIMARY KEY,
+            WORD TEXT NOT NULL,
+            BACK_RHYME_KEY TEXT NOT NULL,
+            FREQUENCY INTEGER,
+            PHONEMES TEXT,
+            STRESSEDSYLLABLE INTEGER,
+            SYLLABLECOUNT INTEGER
+        )
+    """)
+
+    db.execute("""
+        CREATE INDEX IF NOT EXISTS IDX_BACK_RHYME_KEY
+        ON BACK_RHYME_KEYS (BACK_RHYME_KEY)
+    """)
+
+    count = db.execute(
+        "SELECT COUNT(*) FROM BACK_RHYME_KEYS"
+    ).fetchone()[0]
+
+    if count:
+        return
+
+    source_rows = db.execute("""
+        SELECT WORDID, WORD, PHONEMES, FREQUENCY,
+               STRESSEDSYLLABLE, SYLLABLECOUNT
+        FROM RHYMES
+        WHERE PHONEMES IS NOT NULL
+          AND STRESSEDSYLLABLE IS NOT NULL
+          AND SYLLABLECOUNT > 0
+    """).fetchall()
+
+    entries = []
+    for row in source_rows:
+        key = back_rhyme_key(row["PHONEMES"], row["STRESSEDSYLLABLE"])
+        if key is None:
+            continue
+        entries.append((
+            row["WORDID"], row["WORD"], " ".join(key),
+            row["FREQUENCY"], row["PHONEMES"],
+            row["STRESSEDSYLLABLE"], row["SYLLABLECOUNT"],
+        ))
+
+    db.executemany("""
+        INSERT INTO BACK_RHYME_KEYS (
+            WORDID, WORD, BACK_RHYME_KEY, FREQUENCY, PHONEMES,
+            STRESSEDSYLLABLE, SYLLABLECOUNT
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, entries)
+    db.commit()
+    print(f"Built BACK_RHYME_KEYS: {len(entries):,} pronunciation records.")
+
+
+
+def reverse_rhyme_key(reversed_phonemes):
+    """Return the reversed pronunciation from its primary-stressed vowel onward."""
+    if not reversed_phonemes:
+        return None
+    tokens = reversed_phonemes.split()
+    for index, token in enumerate(tokens):
+        if token.endswith("1"):
+            return tuple(tokens[index:])
+    return None
+
+
+def reverse_first_syllable_key(phonemes):
+    """Return the first syllable's reversed rhyme, ignoring lexical stress."""
+    if not phonemes:
+        return None
+    tokens = phonemes.split()
+    vowel_indexes = [
+        i for i, token in enumerate(tokens)
+        if token.endswith(("0", "1", "2"))
+    ]
+    if not vowel_indexes:
+        return None
+    end = vowel_indexes[1] if len(vowel_indexes) > 1 else len(tokens)
+    first_syllable_reversed = list(reversed(tokens[:end]))
+    for index, token in enumerate(first_syllable_reversed):
+        if token.endswith(("0", "1", "2")):
+            return tuple(t.rstrip("012") for t in first_syllable_reversed[index:])
+    return None
+
+
+def ensure_reverse_rhyme_keys(db):
+    """Build indexed keys for Reverse and Reverse First Syllable searches."""
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS REVERSE_RHYME_KEYS (
+            WORDID INTEGER PRIMARY KEY,
+            WORD TEXT NOT NULL,
+            REVERSE_RHYME_KEY TEXT,
+            REVERSE_FIRST_SYLLABLE_KEY TEXT,
+            FREQUENCY INTEGER,
+            PHONEMES TEXT,
+            SYLLABLECOUNT INTEGER
+        )
+    """)
+    db.execute("CREATE INDEX IF NOT EXISTS IDX_REVERSE_RHYME_KEY ON REVERSE_RHYME_KEYS (REVERSE_RHYME_KEY)")
+    db.execute("CREATE INDEX IF NOT EXISTS IDX_REVERSE_FIRST_KEY ON REVERSE_RHYME_KEYS (REVERSE_FIRST_SYLLABLE_KEY)")
+    if db.execute("SELECT COUNT(*) FROM REVERSE_RHYME_KEYS").fetchone()[0]:
+        return
+    source_rows = db.execute("""
+        SELECT WORDID, WORD, PHONEMES, REVERSEPHONEMES, FREQUENCY, SYLLABLECOUNT
+        FROM RHYMES WHERE PHONEMES IS NOT NULL AND SYLLABLECOUNT > 0
+    """).fetchall()
+    entries = []
+    for row in source_rows:
+        reverse_key = reverse_rhyme_key(row["REVERSEPHONEMES"])
+        first_key = reverse_first_syllable_key(row["PHONEMES"])
+        if reverse_key is None and first_key is None:
+            continue
+        entries.append((row["WORDID"], row["WORD"],
+            " ".join(reverse_key) if reverse_key else None,
+            " ".join(first_key) if first_key else None,
+            row["FREQUENCY"], row["PHONEMES"], row["SYLLABLECOUNT"]))
+    db.executemany("""
+        INSERT INTO REVERSE_RHYME_KEYS
+        (WORDID, WORD, REVERSE_RHYME_KEY, REVERSE_FIRST_SYLLABLE_KEY, FREQUENCY, PHONEMES, SYLLABLECOUNT)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, entries)
+    db.commit()
+    print(f"Built REVERSE_RHYME_KEYS: {len(entries):,} pronunciation records.")
+
+
+def fetch_reverse_matches(db, field, source_keys, word, max_frequency=None):
+    if not source_keys:
+        return []
+    if field not in ("REVERSE_RHYME_KEY", "REVERSE_FIRST_SYLLABLE_KEY"):
+        raise ValueError("Invalid reverse-rhyme search field")
+    placeholders = ",".join("?" for _ in source_keys)
+    sql = f"""
+        SELECT WORDID, WORD, FREQUENCY, PHONEMES, SYLLABLECOUNT
+        FROM REVERSE_RHYME_KEYS
+        WHERE {field} IN ({placeholders})
+          AND WORD <> ? COLLATE NOCASE
+          AND SYLLABLECOUNT > 0
+    """
+    parameters = sorted(source_keys) + [word]
+    if max_frequency is not None:
+        sql += " AND FREQUENCY <= ?"
+        parameters.append(max_frequency)
+    sql += " ORDER BY SYLLABLECOUNT, FREQUENCY, WORD"
+    return db.execute(sql, parameters).fetchall()
+
+def ensure_first_syllable_indexes(db):
+    """Create indexes for the two first-syllable search fields."""
+
+    db.execute("""
+        CREATE INDEX IF NOT EXISTS IDX_FIRST_SYLLABLE_REVERSE
+        ON RHYMES (FIRSTSYLLABLEREVERSE)
+    """)
+
+    db.execute("""
+        CREATE INDEX IF NOT EXISTS IDX_FIRST_SYLLABLE_WOCONS
+        ON RHYMES (FIRSTSYLLABLEREVERSEWOCONS)
+    """)
+
+    db.commit()
 
 
 def phoneme_distance_one(a, b):
@@ -166,11 +346,7 @@ def phoneme_distance_one(a, b):
 
 
 def suggest_words(prefix, limit=20, db_path=DB_PATH):
-    """
-    Return words beginning with the supplied spelling prefix.
-
-    Results are alphabetical and case-insensitive.
-    """
+    """Return words beginning with the supplied spelling prefix."""
 
     prefix = prefix.strip().lower()
 
@@ -222,7 +398,7 @@ def search_rhymes(
     rhyme_type="perfect",
 ):
     """
-    Search for perfect, light, or final-syllable rhymes.
+    Search the pronunciation database.
 
     rhyme_type:
         perfect:
@@ -235,11 +411,21 @@ def search_rhymes(
         final_syllable:
             Same final rhyme sound, regardless of stress.
 
+        first_syllable:
+            Same first-syllable vowel and ending consonants.
+
+        first_syllable_assonance:
+            Same first-syllable vowel and initial consonants.
+
     near:
         For perfect rhymes only, also include keys one phoneme edit away.
     """
 
-    rhyme_type = rhyme_type.lower().replace("-", "_").replace(" ", "_")
+    rhyme_type = (
+        rhyme_type.lower()
+        .replace("-", "_")
+        .replace(" ", "_")
+    )
 
     if rhyme_type not in RHYME_TYPES:
         raise ValueError(
@@ -264,8 +450,11 @@ def search_rhymes(
         source_rows = db.execute("""
             SELECT
                 WORD,
+                PHONEMES,
                 REVERSEPHONEMES,
-                STRESSEDSYLLABLE
+                STRESSEDSYLLABLE,
+                FIRSTSYLLABLEREVERSE,
+                FIRSTSYLLABLEREVERSEWOCONS
             FROM RHYMES
             WHERE WORD = ? COLLATE NOCASE
         """, (word,)).fetchall()
@@ -342,17 +531,14 @@ def search_rhymes(
                     ORDER BY R.SYLLABLECOUNT, K.FREQUENCY, K.WORD
                 """
 
-                rows = db.execute(
-                    sql, parameters
-                ).fetchall()
+                rows = db.execute(sql, parameters).fetchall()
 
         # ----------------------------------------------------
         # Light and Final Syllable rhymes
         # ----------------------------------------------------
 
-        else:
+        elif rhyme_type in ("light", "final_syllable"):
 
-            # Build the auxiliary table on the first search.
             ensure_final_rhyme_keys(db)
 
             source_keys = set()
@@ -402,6 +588,85 @@ def search_rhymes(
                     None,
                     max_frequency,
                 )
+
+        # ----------------------------------------------------
+        # Back rhymes
+        # ----------------------------------------------------
+
+        elif rhyme_type == "back":
+
+            ensure_back_rhyme_keys(db)
+
+            source_keys = {
+                " ".join(key)
+                for row in source_rows
+                if (key := back_rhyme_key(
+                    row["PHONEMES"], row["STRESSEDSYLLABLE"]
+                )) is not None
+            }
+
+            if not source_keys:
+                raise NoUsablePronunciationError(word)
+
+            rows = fetch_back_rhyme_matches(
+                db, source_keys, word, max_frequency
+            )
+
+        # ----------------------------------------------------
+        # Reverse and Reverse First Syllable rhymes
+        # ----------------------------------------------------
+
+        elif rhyme_type in ("reverse", "reverse_first_syllable"):
+            ensure_reverse_rhyme_keys(db)
+            if rhyme_type == "reverse":
+                field = "REVERSE_RHYME_KEY"
+                source_keys = {
+                    " ".join(key)
+                    for row in source_rows
+                    if (key := reverse_rhyme_key(row["REVERSEPHONEMES"])) is not None
+                }
+            else:
+                field = "REVERSE_FIRST_SYLLABLE_KEY"
+                source_keys = {
+                    " ".join(key)
+                    for row in source_rows
+                    if (key := reverse_first_syllable_key(row["PHONEMES"])) is not None
+                }
+            if not source_keys:
+                raise NoUsablePronunciationError(word)
+            rows = fetch_reverse_matches(
+                db, field, source_keys, word, max_frequency
+            )
+
+        # ----------------------------------------------------
+        # First Syllable and First Syllable Assonance
+        # ----------------------------------------------------
+
+        else:
+
+            ensure_first_syllable_indexes(db)
+
+            if rhyme_type == "first_syllable":
+                field = "FIRSTSYLLABLEREVERSE"
+            else:
+                field = "FIRSTSYLLABLEREVERSEWOCONS"
+
+            source_keys = {
+                row[field]
+                for row in source_rows
+                if row[field]
+            }
+
+            if not source_keys:
+                raise NoUsablePronunciationError(word)
+
+            rows = fetch_first_syllable_matches(
+                db,
+                field,
+                source_keys,
+                word,
+                max_frequency,
+            )
 
     finally:
         db.close()
@@ -513,4 +778,74 @@ def fetch_final_rhymes(
         ORDER BY SYLLABLECOUNT, FREQUENCY, WORD
     """
 
+    return db.execute(sql, parameters).fetchall()
+
+
+def fetch_first_syllable_matches(
+    db,
+    field,
+    source_keys,
+    word,
+    max_frequency=None,
+):
+    """Fetch first-syllable matches using the appropriate index."""
+
+    if not source_keys:
+        return []
+
+    # field is selected internally, never supplied by the user.
+    if field not in (
+        "FIRSTSYLLABLEREVERSE",
+        "FIRSTSYLLABLEREVERSEWOCONS",
+    ):
+        raise ValueError("Invalid first-syllable search field")
+
+    placeholders = ",".join("?" for _ in source_keys)
+
+    sql = f"""
+        SELECT
+            WORDID,
+            WORD,
+            FREQUENCY,
+            PHONEMES,
+            SYLLABLECOUNT
+        FROM RHYMES
+        WHERE {field} IN ({placeholders})
+          AND WORD <> ? COLLATE NOCASE
+          AND SYLLABLECOUNT > 0
+    """
+
+    parameters = sorted(source_keys) + [word]
+
+    if max_frequency is not None:
+        sql += " AND FREQUENCY <= ?"
+        parameters.append(max_frequency)
+
+    sql += """
+        ORDER BY SYLLABLECOUNT, FREQUENCY, WORD
+    """
+
+    return db.execute(sql, parameters).fetchall()
+
+
+def fetch_back_rhyme_matches(db, source_keys, word, max_frequency=None):
+    """Fetch Back-rhyme matches using the indexed Back-rhyme key table."""
+    if not source_keys:
+        return []
+
+    placeholders = ",".join("?" for _ in source_keys)
+    sql = f"""
+        SELECT WORDID, WORD, FREQUENCY, PHONEMES, SYLLABLECOUNT
+        FROM BACK_RHYME_KEYS
+        WHERE BACK_RHYME_KEY IN ({placeholders})
+          AND WORD <> ? COLLATE NOCASE
+          AND SYLLABLECOUNT > 0
+    """
+    parameters = sorted(source_keys) + [word]
+
+    if max_frequency is not None:
+        sql += " AND FREQUENCY <= ?"
+        parameters.append(max_frequency)
+
+    sql += " ORDER BY SYLLABLECOUNT, FREQUENCY, WORD"
     return db.execute(sql, parameters).fetchall()

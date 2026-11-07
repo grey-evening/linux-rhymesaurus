@@ -29,10 +29,11 @@ RHYME_CATEGORIES = [
     ("Perfect / Normative", "perfect"),
     ("Light", "light"),
     ("Final Syllable", "final_syllable"),
-    ("First Syllable", None),
-    ("Back", None),
-    ("Reverse", None),
-    ("Reverse First Syllable", None),
+    ("First Syllable", "first_syllable"),
+    ("First Syllable Assonance", "first_syllable_assonance"),
+    ("Back", "back"),
+    ("Reverse", "reverse"),
+    ("Reverse First Syllable", "reverse_first_syllable"),
     ("Homophone", None),
     ("Consonance", None),
     ("Double Consonance", None),
@@ -321,7 +322,7 @@ class RhymeApplication:
         ttk.Label(
             sidebar,
             text=(
-                "The first three rhyme types are now available. "
+                "The first six rhyme types are now available. "
                 "Additional rhyme types will be implemented "
                 "in future versions."
             ),
