@@ -1,1 +1,0 @@
-/opt/firebird/include/iberror.h

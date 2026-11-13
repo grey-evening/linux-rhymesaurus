@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 
+import re
 import tkinter as tk
 from tkinter import ttk
 
 from rhyme_engine import (
     suggest_words,
+    fetch_dictionary_entries,
+    search_thesaurus_headwords,
+    fetch_thesaurus_entry,
+    fetch_thesaurus_entry_by_number,
     search_rhymes,
     FREQUENCY_CATEGORIES,
     WordNotFoundError,
@@ -34,20 +39,20 @@ RHYME_CATEGORIES = [
     ("Back", "back"),
     ("Reverse", "reverse"),
     ("Reverse First Syllable", "reverse_first_syllable"),
-    ("Homophone", None),
-    ("Consonance", None),
-    ("Double Consonance", None),
-    ("Full Consonance", None),
-    ("Assonance", None),
-    ("Full Assonance", None),
-    ("Full Assonance w/ End Cons", None),
-    ("Sight", None),
-    ("Half-double", None),
-    ("Amphibraenic", None),
-    ("Elided", None),
-    ("Begins With", None),
-    ("Ends With", None),
-    ("Contains", None),
+    ("Homophones", "homophones"),
+    ("Consonance", "consonance"),
+    ("Double Consonance", "double_consonance"),
+    ("Full Consonance", "full_consonance"),
+    ("Assonance", "assonance"),
+    ("Full Assonance", "full_assonance"),
+    ("Full Assonance & End Consonant", "full_assonance_end_consonant"),
+    ("Sight", "sight"),
+    ("Half-double", "half_double"),
+    ("Amphisbaenic", "amphisbaenic"),
+    ("Elided", "elided"),
+    ("Begins With", "begins_with"),
+    ("Ends With", "ends_with"),
+    ("Contains", "contains"),
 ]
 
 # Number of words inserted during each GUI update.
@@ -62,8 +67,9 @@ class RhymeApplication:
     def __init__(self, root):
         self.root = root
         self.root.title("Rhymesaurus — Rhyming Dictionary")
-        self.root.geometry("1500x1000")
-        self.root.minsize(750, 500)
+        # Start at twice the previous default size (1500x1000).
+        self.root.geometry("3000x2000")
+        self.root.minsize(1500, 1000)
         self.root.configure(bg=COLORS["background"])
 
         self.current_word = None
@@ -74,6 +80,9 @@ class RhymeApplication:
         self.suggestion_list = None
 
         self.word_tag_number = 0
+        self.thesaurus_entry_history = []
+        self.thesaurus_entry_history_index = -1
+        self._thesaurus_history_action = False
 
         # Incremental-rendering state.
         self.render_after_id = None
@@ -173,92 +182,345 @@ class RhymeApplication:
     # --------------------------------------------------------
 
     def build_interface(self):
-        outer = ttk.Frame(
-            self.root,
-            style="App.TFrame",
-            padding=(22, 16, 22, 12),
-        )
+        outer = ttk.Frame(self.root, style="App.TFrame", padding=(12, 10, 12, 8))
         outer.pack(fill="both", expand=True)
 
-        header = ttk.Frame(outer, style="App.TFrame")
-        header.pack(fill="x", pady=(0, 14))
+        toolbar = ttk.Frame(outer, style="App.TFrame")
+        toolbar.pack(fill="x", pady=(0, 8))
 
-        ttk.Label(
-            header,
-            text="RHYMESAURUS",
-            style="Heading.TLabel",
-        ).pack(anchor="w")
-
-        ttk.Label(
-            header,
-            text="A rhyming dictionary",
-            style="Subtitle.TLabel",
-        ).pack(anchor="w", pady=(2, 0))
+        self.back_button = ttk.Button(toolbar, text="◀ Back", command=self.go_back, state="disabled")
+        self.back_button.pack(side="left")
+        self.forward_button = ttk.Button(toolbar, text="Forward ▶", command=self.go_forward, state="disabled")
+        self.forward_button.pack(side="left", padx=(4, 12))
+        self.stop_button = ttk.Button(toolbar, text="■ Stop", command=self.stop_search, state="disabled")
+        self.stop_button.pack(side="left")
+        ttk.Label(toolbar, text="RHYMESAURUS", style="Heading.TLabel").pack(side="right")
 
         search_area = ttk.Frame(outer, style="App.TFrame")
-        search_area.pack(fill="x", pady=(0, 13))
-
-        ttk.Label(
-            search_area,
-            text="WORD TO FIND",
-            background=COLORS["background"],
-            foreground=COLORS["muted"],
-            font=("TkDefaultFont", 8, "bold"),
-        ).pack(anchor="w", pady=(0, 5))
-
+        search_area.pack(fill="x", pady=(0, 9))
+        ttk.Label(search_area, text="WORD TO FIND", background=COLORS["background"],
+                  foreground=COLORS["muted"], font=("TkDefaultFont", 8, "bold")).pack(anchor="w", pady=(0, 4))
         search_row = ttk.Frame(search_area, style="App.TFrame")
         search_row.pack(fill="x")
-
         self.search_var = tk.StringVar()
-
-        self.entry = ttk.Entry(
-            search_row,
-            textvariable=self.search_var,
-            style="Search.TEntry",
-        )
+        self.entry = ttk.Entry(search_row, textvariable=self.search_var, style="Search.TEntry")
         self.entry.pack(side="left", fill="x", expand=True)
-
         self.entry.bind("<KeyRelease>", self.update_suggestions)
         self.entry.bind("<Down>", self.move_down)
         self.entry.bind("<Up>", self.move_up)
         self.entry.bind("<Return>", self.enter_search)
         self.entry.bind("<Escape>", self.hide_suggestions)
+        self.search_button = ttk.Button(search_row, text="Search", style="Accent.TButton", command=self.search_from_entry)
+        self.search_button.pack(side="left", padx=(8, 0))
 
-        self.search_button = ttk.Button(
-            search_row,
-            text="Search",
-            style="Accent.TButton",
-            command=self.search_from_entry,
-        )
-        self.search_button.pack(side="left", padx=(9, 0))
+        self.notebook = ttk.Notebook(outer)
+        self.notebook.pack(fill="both", expand=True)
 
-        ttk.Separator(outer).pack(fill="x", pady=(0, 14))
+        self.dictionary_tab = ttk.Frame(self.notebook, padding=12)
+        self.thesaurus_tab = ttk.Frame(self.notebook, padding=12)
+        self.rhyming_tab = ttk.Frame(self.notebook, padding=8)
+        for tab, label in (
+            (self.dictionary_tab, "Dictionary"),
+            (self.thesaurus_tab, "Thesaurus"),
+            (self.rhyming_tab, "Rhyme"),
+        ):
+            self.notebook.add(tab, text=label)
 
-        content = ttk.Frame(outer, style="App.TFrame")
-        content.pack(fill="both", expand=True)
+        self.build_sidebar(self.rhyming_tab)
+        self.build_results_panel(self.rhyming_tab)
+        self.rhyming_tab.columnconfigure(1, weight=1)
+        self.rhyming_tab.rowconfigure(0, weight=1)
 
-        content.columnconfigure(0, weight=0)
+        self.build_dictionary_tab(self.dictionary_tab)
+        self.build_thesaurus_tab(self.thesaurus_tab)
+        self.status_var = tk.StringVar(value="Ready")
+        status = tk.Label(outer, textvariable=self.status_var, bg=COLORS["background"],
+                          fg=COLORS["muted"], font=("TkDefaultFont", 9), anchor="w", padx=2, pady=5)
+        status.pack(fill="x", side="bottom")
+        self.history = []
+        self.history_index = -1
+        self._restoring_history = False
+        self.notebook.bind("<<NotebookTabChanged>>", self.on_tab_changed)
+        self.notebook.select(self.rhyming_tab)
+        self.entry.focus_set()
+
+    def build_thesaurus_tab(self, parent):
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(1, weight=1)
+        ttk.Label(
+            parent, text="Thesaurus", font=("TkDefaultFont", 15, "bold")
+        ).grid(row=0, column=0, sticky="w", pady=(4, 12))
+
+        content = ttk.Frame(parent)
+        content.grid(row=1, column=0, sticky="nsew")
+        content.columnconfigure(0, weight=0, minsize=300)
         content.columnconfigure(1, weight=1)
         content.rowconfigure(0, weight=1)
 
-        self.build_sidebar(content)
-        self.build_results_panel(content)
-
-        self.status_var = tk.StringVar(value="Ready")
-
-        status = tk.Label(
-            outer,
-            textvariable=self.status_var,
-            bg=COLORS["background"],
-            fg=COLORS["muted"],
-            font=("TkDefaultFont", 9),
-            anchor="w",
-            padx=2,
-            pady=7,
+        left = ttk.Frame(content)
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
+        left.columnconfigure(0, weight=1)
+        left.rowconfigure(1, weight=1)
+        ttk.Label(left, text="MATCHING HEADWORDS",
+                  font=("TkDefaultFont", 9, "bold")).grid(
+            row=0, column=0, sticky="w", pady=(0, 6)
         )
-        status.pack(fill="x", side="bottom")
+        list_frame = ttk.Frame(left)
+        list_frame.grid(row=1, column=0, sticky="nsew")
+        list_frame.columnconfigure(0, weight=1)
+        list_frame.rowconfigure(0, weight=1)
+        self.thesaurus_list = tk.Listbox(
+            list_frame, exportselection=False,
+            font=("TkDefaultFont", 11),
+            background=COLORS["panel"], foreground=COLORS["text"],
+            selectbackground=COLORS["selected"],
+            selectforeground=COLORS["text"],
+            relief="flat", borderwidth=0,
+            highlightthickness=1, highlightbackground=COLORS["border"],
+        )
+        list_scroll = ttk.Scrollbar(
+            list_frame, orient="vertical", command=self.thesaurus_list.yview
+        )
+        self.thesaurus_list.configure(yscrollcommand=list_scroll.set)
+        self.thesaurus_list.grid(row=0, column=0, sticky="nsew")
+        list_scroll.grid(row=0, column=1, sticky="ns")
+        self.thesaurus_list.bind("<<ListboxSelect>>", self.select_thesaurus_entry)
 
-        self.entry.focus_set()
+        right = ttk.Frame(content)
+        right.grid(row=0, column=1, sticky="nsew")
+        right.columnconfigure(0, weight=1)
+        right.rowconfigure(1, weight=1)
+        entry_toolbar = ttk.Frame(right)
+        entry_toolbar.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        ttk.Label(entry_toolbar, text="ENTRY",
+                  font=("TkDefaultFont", 9, "bold")).pack(side="left")
+        self.thesaurus_back_button = ttk.Button(
+            entry_toolbar, text="← Previous entry", command=self.thesaurus_go_back,
+            state="disabled"
+        )
+        self.thesaurus_back_button.pack(side="right")
+        entry_frame = ttk.Frame(right)
+        entry_frame.grid(row=1, column=0, sticky="nsew")
+        entry_frame.columnconfigure(0, weight=1)
+        entry_frame.rowconfigure(0, weight=1)
+        self.thesaurus_text = tk.Text(
+            entry_frame, wrap="word", font=("TkDefaultFont", 11),
+            padx=18, pady=14, relief="flat",
+            background=COLORS["panel"], foreground=COLORS["text"],
+            state="disabled"
+        )
+        entry_scroll = ttk.Scrollbar(
+            entry_frame, orient="vertical", command=self.thesaurus_text.yview
+        )
+        self.thesaurus_text.configure(yscrollcommand=entry_scroll.set)
+        self.thesaurus_text.grid(row=0, column=0, sticky="nsew")
+        entry_scroll.grid(row=0, column=1, sticky="ns")
+        self.thesaurus_text.tag_configure(
+            "headword", font=("TkDefaultFont", 16, "bold"),
+            foreground=COLORS["accent"], spacing3=10
+        )
+        self.thesaurus_text.tag_configure(
+            "body", font=("TkDefaultFont", 11), spacing1=2
+        )
+        self.thesaurus_matches = []
+
+    def perform_thesaurus_search(self, term, add_history=True):
+        self.current_word = term
+        self.cancel_rendering()
+        if add_history and not self._restoring_history:
+            self.record_search_word(term)
+        self.thesaurus_matches = search_thesaurus_headwords(term)
+        self.thesaurus_list.delete(0, "end")
+        self.thesaurus_text.configure(state="normal")
+        self.thesaurus_text.delete("1.0", "end")
+
+        if not self.thesaurus_matches:
+            self.thesaurus_text.insert(
+                "end", f"No Thesaurus entries contain “{term}”."
+            )
+            self.status_var.set(f"No Thesaurus entries found for {term}.")
+        else:
+            for row in self.thesaurus_matches:
+                self.thesaurus_list.insert("end", row["WORD"])
+            self.thesaurus_text.insert(
+                "end", "Select a headword to display its complete entry."
+            )
+            self.status_var.set(
+                f"{len(self.thesaurus_matches)} Thesaurus headwords match {term}."
+            )
+
+        self.thesaurus_text.configure(state="disabled")
+        self.stop_button.configure(state="disabled")
+
+    @staticmethod
+    def clean_thesaurus_text(raw_text):
+        """Clean source line endings/control bytes and lay out Roget sections."""
+        text = (raw_text or "").replace("\r\n", "\n").replace("\r", "\n")
+        text = "".join(ch for ch in text if ch in "\n\t" or ord(ch) >= 32)
+        text = text.replace("\x7f", "")
+        text = re.sub(r"[ \t]+\n", "\n", text)
+        text = re.sub(r"\n[ \t]+", "\n", text)
+        text = re.sub(r"\n{3,}", "\n\n", text).strip()
+
+        # Roget entries commonly run POS labels together with preceding text.
+        # Put each recognized label at the start of a separate paragraph.
+        text = re.sub(
+            r"(?<![A-Za-z])(?=(?:N\.|V\.|Adj\.|Adv\.)\s)",
+            "\n\n", text
+        )
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()
+
+    def _update_thesaurus_back_button(self):
+        self.thesaurus_back_button.configure(
+            state="normal" if self.thesaurus_entry_history_index > 0 else "disabled"
+        )
+
+    def show_thesaurus_entry(self, entry, select_in_list=True, record_history=True):
+        if not entry:
+            return
+        wordid = entry["WORDID"]
+        if record_history and not self._thesaurus_history_action:
+            if (self.thesaurus_entry_history_index < 0
+                    or self.thesaurus_entry_history[self.thesaurus_entry_history_index] != wordid):
+                self.thesaurus_entry_history = self.thesaurus_entry_history[:self.thesaurus_entry_history_index + 1]
+                self.thesaurus_entry_history.append(wordid)
+                self.thesaurus_entry_history_index = len(self.thesaurus_entry_history) - 1
+        if select_in_list:
+            found = next((i for i, row in enumerate(self.thesaurus_matches)
+                          if row["WORDID"] == wordid), None)
+            if found is None:
+                self.thesaurus_matches.append({"WORDID": wordid, "WORD": entry.get("WORD") or ""})
+                self.thesaurus_list.insert("end", entry.get("WORD") or "")
+                found = len(self.thesaurus_matches) - 1
+            self.thesaurus_list.selection_clear(0, "end")
+            self.thesaurus_list.selection_set(found)
+            self.thesaurus_list.see(found)
+
+        self.thesaurus_text.configure(state="normal")
+        self.thesaurus_text.delete("1.0", "end")
+        headword = (entry.get("WORD") or "").upper()
+        self.thesaurus_text.insert("end", headword + "\n", "headword")
+        body = self.clean_thesaurus_text(entry.get("TEXT") or "")
+        body_start = self.thesaurus_text.index("end-1c")
+        self.thesaurus_text.insert("end", body, "body")
+
+        # Numeric Roget references are resolved on click; non-references remain harmless.
+        for match in re.finditer(r"(?<![\w#])(\d{1,4})(?![\w])", body):
+            number = match.group(1)
+            start = f"{body_start}+{match.start()}c"
+            finish = f"{start}+{len(number)}c"
+            tag = f"crossref_{match.start()}"
+            self.thesaurus_text.tag_add(tag, start, finish)
+            self.thesaurus_text.tag_configure(tag, foreground=COLORS["accent"], underline=True)
+            self.thesaurus_text.tag_bind(
+                tag, "<Button-1>", lambda event, n=number: self.open_thesaurus_crossref(n)
+            )
+            self.thesaurus_text.tag_bind(
+                tag, "<Enter>", lambda event: self.thesaurus_text.configure(cursor="hand2")
+            )
+            self.thesaurus_text.tag_bind(
+                tag, "<Leave>", lambda event: self.thesaurus_text.configure(cursor="")
+            )
+
+        self.thesaurus_text.configure(state="disabled")
+        self.thesaurus_text.yview_moveto(0)
+        self.status_var.set(f"Thesaurus entry: {entry.get('WORD', '')}.")
+        self._update_thesaurus_back_button()
+
+    def open_thesaurus_crossref(self, concept_number):
+        entry = fetch_thesaurus_entry_by_number(concept_number)
+        if not entry:
+            self.status_var.set(f"No Thesaurus entry numbered {concept_number} was found.")
+            return
+        self.show_thesaurus_entry(entry, select_in_list=True)
+
+    def thesaurus_go_back(self):
+        if self.thesaurus_entry_history_index <= 0:
+            return
+        self.thesaurus_entry_history_index -= 1
+        wordid = self.thesaurus_entry_history[self.thesaurus_entry_history_index]
+        self._thesaurus_history_action = True
+        try:
+            self.show_thesaurus_entry(fetch_thesaurus_entry(wordid), select_in_list=True,
+                                      record_history=False)
+        finally:
+            self._thesaurus_history_action = False
+        self._update_thesaurus_back_button()
+
+    def select_thesaurus_entry(self, event=None):
+        selection = self.thesaurus_list.curselection()
+        if not selection:
+            return
+        row = self.thesaurus_matches[selection[0]]
+        self.show_thesaurus_entry(fetch_thesaurus_entry(row["WORDID"]),
+                                  select_in_list=False)
+
+    def build_placeholder_tab(self, parent, heading, message):
+        ttk.Label(parent, text=heading, font=("TkDefaultFont", 15, "bold")).pack(anchor="w", pady=(4, 12))
+        ttk.Label(parent, text=message, wraplength=850, justify="left").pack(anchor="w")
+
+    def update_navigation_buttons(self):
+        self.back_button.configure(state="normal" if self.history_index > 0 else "disabled")
+        self.forward_button.configure(state="normal" if self.history_index < len(self.history) - 1 else "disabled")
+
+    def go_back(self):
+        if self.history_index > 0:
+            self.history_index -= 1
+            self.restore_history_entry()
+
+    def go_forward(self):
+        if self.history_index < len(self.history) - 1:
+            self.history_index += 1
+            self.restore_history_entry()
+
+    def restore_history_entry(self):
+        # History stores search words, not tabs. Restore the word in whichever
+        # tab is currently selected.
+        word = self.history[self.history_index]
+        self._restoring_history = True
+        try:
+            self.search_var.set(word)
+            if self.notebook.select() == str(self.dictionary_tab):
+                self.perform_dictionary_search(word, add_history=False)
+            elif self.notebook.select() == str(self.rhyming_tab):
+                index = next(i for i, (_, kind) in enumerate(RHYME_CATEGORIES)
+                             if kind == self.current_rhyme_type)
+                self.category_list.selection_clear(0, "end")
+                self.category_list.selection_set(index)
+                self.perform_search(word, add_history=False)
+            elif self.notebook.select() == str(self.thesaurus_tab):
+                self.perform_thesaurus_search(word, add_history=False)
+        finally:
+            self._restoring_history = False
+        self.update_navigation_buttons()
+
+    def on_tab_changed(self, event=None):
+        # The search term is global: changing tabs runs the same term in the
+        # newly selected search view, without creating a history entry.
+        if not self.current_word or self._restoring_history:
+            return
+        selected = self.notebook.select()
+        if selected == str(self.dictionary_tab):
+            self.perform_dictionary_search(self.current_word, add_history=False)
+        elif selected == str(self.rhyming_tab):
+            self.perform_search(self.current_word, add_history=False)
+        elif selected == str(self.thesaurus_tab):
+            self.perform_thesaurus_search(self.current_word, add_history=False)
+
+    def record_search_word(self, word):
+        # Back/Forward tracks words only; it never records tab changes.
+        if self.history_index < 0 or self.history[self.history_index] != word:
+            self.history = self.history[:self.history_index + 1]
+            self.history.append(word)
+            self.history_index = len(self.history) - 1
+        self.update_navigation_buttons()
+
+    def stop_search(self):
+        self.cancel_rendering()
+        if hasattr(self, "stop_button"):
+            self.stop_button.configure(state="disabled")
+        self.status_var.set("Search display stopped.")
 
     # --------------------------------------------------------
     # Sidebar
@@ -322,9 +584,8 @@ class RhymeApplication:
         ttk.Label(
             sidebar,
             text=(
-                "The first six rhyme types are now available. "
-                "Additional rhyme types will be implemented "
-                "in future versions."
+                "Choose a search type, enter a word or text, "
+                "and select a result to search again."
             ),
             background=COLORS["sidebar"],
             foreground=COLORS["muted"],
@@ -617,9 +878,68 @@ class RhymeApplication:
 
     def search_from_entry(self):
         word = self.search_var.get().strip()
-        if word:
-            self.hide_suggestions()
+        if not word:
+            return
+        self.hide_suggestions()
+        selected = self.notebook.select()
+        if selected == str(self.dictionary_tab):
+            self.perform_dictionary_search(word)
+        elif selected == str(self.thesaurus_tab):
+            self.perform_thesaurus_search(word)
+        else:
             self.perform_search(word)
+
+    def build_dictionary_tab(self, parent):
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(1, weight=1)
+        ttk.Label(parent, text="Dictionary", font=("TkDefaultFont", 15, "bold")).grid(
+            row=0, column=0, sticky="w", pady=(4, 12)
+        )
+        frame = ttk.Frame(parent)
+        frame.grid(row=1, column=0, sticky="nsew")
+        frame.columnconfigure(0, weight=1)
+        frame.rowconfigure(0, weight=1)
+        self.dictionary_text = tk.Text(
+            frame, wrap="word", font=("TkDefaultFont", 11),
+            padx=18, pady=14, relief="flat",
+            background=COLORS["panel"], foreground=COLORS["text"],
+            state="disabled"
+        )
+        scroll = ttk.Scrollbar(frame, orient="vertical", command=self.dictionary_text.yview)
+        self.dictionary_text.configure(yscrollcommand=scroll.set)
+        self.dictionary_text.grid(row=0, column=0, sticky="nsew")
+        scroll.grid(row=0, column=1, sticky="ns")
+        self.dictionary_text.tag_configure("headword", font=("TkDefaultFont", 16, "bold"), foreground=COLORS["accent"], spacing3=8)
+        self.dictionary_text.tag_configure("entry", font=("TkDefaultFont", 11, "bold"), spacing1=8, spacing3=4)
+        self.dictionary_text.tag_configure("body", font=("TkDefaultFont", 11), lmargin1=18, lmargin2=18, spacing3=12)
+        self.dictionary_text.tag_configure("muted", font=("TkDefaultFont", 10, "italic"), foreground=COLORS["muted"])
+
+    def perform_dictionary_search(self, word, add_history=True):
+        self.current_word = word
+        self.cancel_rendering()
+        if add_history and not self._restoring_history:
+            self.record_search_word(word)
+        rows = fetch_dictionary_entries(word)
+        self.dictionary_text.configure(state="normal")
+        self.dictionary_text.delete("1.0", "end")
+        if not rows:
+            self.dictionary_text.insert("end", f"{word.upper()}\n", "headword")
+            self.dictionary_text.insert("end", "No dictionary entry found.", "muted")
+            self.status_var.set(f"No dictionary entry for {word}.")
+        else:
+            self.dictionary_text.insert("end", rows[0]["WORD"].upper() + "\n", "headword")
+            for number, row in enumerate(rows, 1):
+                usage = (row.get("USAGE") or "").strip()
+                definition = (row.get("DEFINITION") or "").strip()
+                label = f"{number}."
+                if usage:
+                    label += f" {usage}"
+                self.dictionary_text.insert("end", label + "\n", "entry")
+                if definition:
+                    self.dictionary_text.insert("end", definition + "\n", "body")
+            self.status_var.set(f"{len(rows)} dictionary entr{'y' if len(rows) == 1 else 'ies'} for {word}.")
+        self.dictionary_text.configure(state="disabled")
+        self.stop_button.configure(state="disabled")
 
     # --------------------------------------------------------
     # Search
@@ -635,10 +955,14 @@ class RhymeApplication:
                 return label
         return "Rhymes"
 
-    def perform_search(self, word):
+    def perform_search(self, word, add_history=True):
         self.hide_suggestions()
         self.current_word = word
 
+        if add_history and not self._restoring_history:
+            self.record_search_word(word)
+
+        self.stop_button.configure(state="normal")
         # Invalidate and cancel any previous rendering operation.
         self.cancel_rendering()
         self.clear_results()
@@ -655,6 +979,7 @@ class RhymeApplication:
             self.results_heading.config(text=f"Word not found: {word}")
             self.insert_message("No matching word in the database.")
             self.status_var.set("No matching word in the database.")
+            self.stop_button.configure(state="disabled")
             return
         except NoUsablePronunciationError:
             self.results_heading.config(
@@ -662,6 +987,7 @@ class RhymeApplication:
             )
             self.insert_message("No rhyme search is available.")
             self.status_var.set("No rhyme search is available.")
+            self.stop_button.configure(state="disabled")
             return
 
         category = self.active_category_label()
@@ -676,6 +1002,7 @@ class RhymeApplication:
         if not data["groups"]:
             self.insert_message("No rhymes found.")
             self.status_var.set("No results.")
+            self.stop_button.configure(state="disabled")
             return
 
         self.results_text.configure(state="normal")
@@ -814,6 +1141,7 @@ class RhymeApplication:
                 f"Showing all {self.render_total_words:,} words"
                 "  |  Click a word to search for its rhymes"
             )
+            self.stop_button.configure(state="disabled")
 
     # --------------------------------------------------------
     # Text helpers

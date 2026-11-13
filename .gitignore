@@ -1,0 +1,10 @@
+# Database is distributed inside the Debian release package
+rhymesaurus.sqlite3
+
+# Python-generated files
+__pycache__/
+*.pyc
+
+# Built Debian packages and staging directories
+packaging/rhymesaurus_*_all/
+packaging/*.deb
